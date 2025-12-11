@@ -11,4 +11,4 @@ Student Info
 
 * Student Name: Nguyen Nam Khanh
 * Student ID: 23BI14216
-* Student Group ID: Not-for-now
+* Student Group ID: 11
