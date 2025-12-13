@@ -4,14 +4,12 @@ import os
 import file_transfer_pb2
 import file_transfer_pb2_grpc
 
-CHUNK_SIZE = 1024 * 1024  # 1MB chunks
+CHUNK_SIZE = 1024 * 1024
 
 def generate_requests(filename):
-    # 1. Send metadata
     metadata = file_transfer_pb2.MetaData(filename=os.path.basename(filename))
     yield file_transfer_pb2.UploadRequest(metadata=metadata)
     
-    # 2. Send content chunks
     with open(filename, 'rb') as f:
         while True:
             chunk = f.read(CHUNK_SIZE)
