@@ -22,22 +22,19 @@ def run(server_address, filename):
         print(f"Error: File '{filename}' not found.")
         return
 
-    print(f"Client: Connect to {server_address}")
+    print(f"Connect to {server_address}")
     with grpc.insecure_channel(server_address) as channel:
         stub = file_transfer_pb2_grpc.FileTransferStub(channel)
         
-        print(f"Client: Starting upload of {filename}...")
+        print(f"Starting upload {filename}...")
         try:
             response = stub.UploadFile(generate_requests(filename))
-            print(f"Client: Upload status: {response.success}")
-            print(f"Client: Server message: {response.message}")
+            print(f"Server message: {response.message}")
         except grpc.RpcError as e:
-            print(f"Client: RPC failed: {e}")
+            print(f"RPC failed: {e}")
 
 if __name__ == '__main__':
     if len(sys.argv) < 3:
-        print(f"Usage: {sys.argv[0]} <server_ip:port> <filename>")
-        print(f"Example: {sys.argv[0]} localhost:50051 test.txt")
         sys.exit(1)
         
     server_address = sys.argv[1]
