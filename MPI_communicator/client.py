@@ -56,6 +56,59 @@ class ChatClient:
         sys.stdout.write('You: ')
         sys.stdout.flush()
 
+    def send_file(self, filepath: str, to_rank: int):
+        import os
+        if not os.path.exists(filepath):
+            print(f"File not found: {filepath}")
+            self._safe_print(f"File not found: {filepath}")
+            return
+
+        filename = os.path.basename(filepath)
+        file_size = os.path.getsize(filepath)
+        target_id = next((u['user_id'] for u in self.online_users if u['rank'] == to_rank), None)
+        
+        if not target_id:
+            msg = f"Rank {to_rank} not found online."
+            print(msg)
+            self._safe_print(msg)
+            return
+
+        file_id = str(uuid.uuid4())
+        
+        meta = {
+            'file_id': file_id,
+            'filename': filename,
+            'size': file_size,
+            'from_user': self.user_id,
+            'to_user': target_id
+        }
+        self.transport.send(meta, 0, 2) 
+        self._safe_print(f"Sending file {filename} to Rank {to_rank}...")
+
+        CHUNK_SIZE = 1024 * 1024 
+        chunk_idx = 0
+        total_chunks = (file_size // CHUNK_SIZE) + 1
+        
+        with open(filepath, 'rb') as f:
+            while True:
+                data = f.read(CHUNK_SIZE)
+                if not data:
+                    break
+                
+                chunk = {
+                    'file_id': file_id,
+                    'filename': filename,
+                    'chunk_index': chunk_idx,
+                    'total_chunks': total_chunks,
+                    'data': data,
+                    'to_user': target_id 
+                }
+                self.transport.send(chunk, 0, 3) 
+                chunk_idx += 1
+                time.sleep(0.001)
+                
+        self._safe_print(f"File {filename} sent.")
+
     def handle_incoming(self, data, source, tag):
         if tag == TAG_MSG:
             msg: Message = data
@@ -76,11 +129,33 @@ class ChatClient:
             cmd = data
             if cmd['type'] == 'USER_LIST_UPDATE':
                 self.online_users = cmd['users']
+        
+        elif tag == 2: 
+            meta = data
+            filename = meta['filename']
+            sender = meta['from_user']
+            self._safe_print(f"Incoming file '{filename}' from {sender}...")
+            
+        elif tag == 3: 
+            import os
+            chunk = data
+            filename = chunk['filename']
+            file_data = chunk['data']
+            
+            os.makedirs("downloads", exist_ok=True)
+            path = os.path.join("downloads", filename)
+            
+            with open(path, 'ab') as f:
+                f.write(file_data)
+                
+            if chunk['chunk_index'] == chunk['total_chunks'] - 1:
+                self._safe_print(f"File '{filename}' download complete (saved to downloads/).")
 
     def start_input_loop(self):
         print("Type a message and press Enter. Type '/quit' to exit.")
         print("Type '/users' to list online users.")
         print("Type '/dm <rank> <msg>' to send a direct message.")
+        print("Type '/send <path> <rank>' to send a file.")
         
         sys.stdout.write("You: ")
         sys.stdout.flush()
@@ -117,6 +192,18 @@ class ChatClient:
                     else:
                         print("Usage: /dm <rank> <msg>")
                     
+                    sys.stdout.write("You: ")
+                    sys.stdout.flush()
+                    continue
+                
+                if inp.startswith('/send '):
+                    parts = inp.split(' ')
+                    if len(parts) >= 3:
+                        filepath = parts[1]
+                        rank = int(parts[2])
+                        threading.Thread(target=self.send_file, args=(filepath, rank)).start()
+                    else:
+                        print("Usage: /send <filepath> <rank>")
                     sys.stdout.write("You: ")
                     sys.stdout.flush()
                     continue

@@ -1,5 +1,5 @@
 import time
-from .transport import MPITransport, TAG_MSG, TAG_CMD
+from .transport import MPITransport, TAG_MSG, TAG_CMD, TAG_FILE_META, TAG_FILE_CHUNK
 from .models import Message, MessageType, User
 
 class Server:
@@ -27,8 +27,8 @@ class Server:
     def handle_message(self, data, source: int, tag: int):
         if tag == TAG_CMD:
             return self.handle_command(data, source)
-        elif tag == TAG_MSG:
-            self.route_message(data, source)
+        elif tag == TAG_MSG or tag == TAG_FILE_META or tag == TAG_FILE_CHUNK:
+            self.route_message(data, source, tag)
         else:
             print(f"[Server] Unknown tag {tag} from {source}")
         return True
@@ -54,24 +54,26 @@ class Server:
             return False
         return True
 
-    def route_message(self, msg: Message, source: int):
+    def route_message(self, msg: dict, source: int, tag: int):
         if source not in self.users:
             print(f"[Server] Dropping message from unknown rank {source}")
             return
-        if not msg.get('timestamp'):
+
+        if tag == TAG_MSG and not msg.get('timestamp'):
             msg['timestamp'] = time.time()
-        dest_id = msg.get('to_user')
+
+        dest_id = msg.get('to_user') 
+        
         if dest_id and dest_id != 'all':
             target_rank = self.get_rank_by_id(dest_id)
             if target_rank:
-                print(f"[Server] Routing DM from {source} to {target_rank}")
-                self.transport.send(msg, target_rank, TAG_MSG)
+                self.transport.send(msg, target_rank, tag)
             else:
                 print(f"[Server] User {dest_id} not found")
         else:
             for rank in self.users:
                 if rank != 0 and rank != source:
-                    self.transport.send(msg, rank, TAG_MSG)
+                    self.transport.send(msg, rank, tag)
 
     def broadcast_system_msg(self, text: str):
         msg: Message = {
