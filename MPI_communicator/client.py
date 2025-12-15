@@ -147,7 +147,10 @@ class ChatClient:
             if type == MessageType.SYSTEM.value:
                 text_to_print = f"[SYSTEM {timestamp}] {content}"
             else:
-                text_to_print = f"[{sender} {timestamp}]: {content}"
+                prefix = ""
+                if msg.get('to_user') and msg['to_user'] != 'all':
+                    prefix = "(Private) "
+                text_to_print = f"{prefix}[{sender} {timestamp}]: {content}"
             
             self._safe_print(text_to_print)
                 
