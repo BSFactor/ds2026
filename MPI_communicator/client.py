@@ -14,6 +14,10 @@ class ChatClient:
         self.running = False
         self.online_users = []
         self.recv_thread = threading.Thread(target=self.listen_loop, daemon=True)
+        
+        # Handshake State
+        self.active_transfers = {} # file_id -> {filepath, to_rank, use_p2p, ...}
+        self.pending_offers = {}   # from_rank -> {file_id, filename, size, ...}
 
     def login(self):
         join_cmd = {
@@ -38,7 +42,7 @@ class ChatClient:
             'timestamp': time.time()
         }
         
-        # 67
+        # P2P Logic for DMs
         if use_p2p and to_user != 'all':
             target_rank = next((u['rank'] for u in self.online_users if u['user_id'] == to_user), None)
             if target_rank:
@@ -68,9 +72,9 @@ class ChatClient:
         sys.stdout.flush()
 
     def send_file(self, filepath: str, to_rank: int, use_p2p: bool = False):
+        """Initiates file transfer by sending a Request (REQ)"""
         import os
         if not os.path.exists(filepath):
-            print(f"File not found: {filepath}")
             self._safe_print(f"File not found: {filepath}")
             return
 
@@ -79,20 +83,63 @@ class ChatClient:
         target_id = next((u['user_id'] for u in self.online_users if u['rank'] == to_rank), None)
         
         if not target_id:
-            msg = f"Rank {to_rank} not found online."
-            print(msg)
-            self._safe_print(msg)
+            self._safe_print(f"Rank {to_rank} not found online.")
             return
 
         file_id = str(uuid.uuid4())
         
-        dest_rank = to_rank if use_p2p else 0
-        tag_meta = 2
-        tag_chunk = 3 
-        mode_str = "P2P" if use_p2p else "Server Relay"
+        # Store state for when ACK comes back
+        self.active_transfers[file_id] = {
+            'filepath': filepath,
+            'to_rank': to_rank,
+            'use_p2p': use_p2p,
+            'target_id': target_id,
+            'filename': filename,
+            'filesize': file_size
+        }
 
+        # Determine Routing for REQ
+        dest_rank = to_rank if use_p2p else 0
+        tag_req = 4 # TAG_FILE_REQ
+
+        meta = {
+            'file_id': file_id,
+            'filename': filename,
+            'size': file_size,
+            'from_user': self.user_id,
+            'to_user': target_id,
+            'from_rank': self.rank # Helpful for receiver
+        }
+        
         try:
-            # 1. Send Metadata
+            self.transport.send(meta, dest_rank, tag_req)
+            self._safe_print(f"Sent request for '{filename}' to Rank {to_rank}. Waiting for approval...")
+        except Exception as e:
+            self._safe_print(f"Failed to send request: {e}")
+            del self.active_transfers[file_id]
+
+    def _perform_upload(self, transfer_info):
+        """Actually sends the file chunks (Called after ACK)"""
+        import os
+        file_id = "unknown"
+        try:
+            filepath = transfer_info['filepath']
+            to_rank = transfer_info['to_rank']
+            use_p2p = transfer_info['use_p2p']
+            target_id = transfer_info['target_id']
+            filename = transfer_info['filename']
+            file_size = transfer_info['filesize']
+            
+            dest_rank = to_rank if use_p2p else 0
+            tag_meta = 2   # TAG_FILE_META (Still needed for legacy/setup or just skipped?)
+            # Actually, we can skip META if the receiver already has it from REQ, 
+            # BUT the receiver logic (handle_incoming) currently expects META + CHUNKS.
+            # To be safe and compatible with existing receive logic, we send META then CHUNKS.
+            
+            tag_chunk = 3 
+            mode_str = "P2P" if use_p2p else "Server Relay"
+
+            # 1. Send Metadata (The "Official" Start)
             meta = {
                 'file_id': file_id,
                 'filename': filename,
@@ -101,10 +148,10 @@ class ChatClient:
                 'to_user': target_id
             }
             self.transport.send(meta, dest_rank, tag_meta)
-            self._safe_print(f"[{mode_str}] Sending file {filename} to Rank {to_rank}...")
+            self._safe_print(f"[{mode_str}] Uploading {filename} to Rank {to_rank}...")
 
             # 2. Send Chunks
-            CHUNK_SIZE = 1024 * 1024 # 1MB chunks
+            CHUNK_SIZE = 1024 * 1024 
             chunk_idx = 0
             total_chunks = (file_size // CHUNK_SIZE) + 1
             
@@ -130,10 +177,11 @@ class ChatClient:
             
         except Exception as e:
             if use_p2p:
-                self._safe_print(f"[P2P Failed]: {e}.")
-                self.send_file(filepath, to_rank, use_p2p=False)
+                self._safe_print(f"[P2P Failed]: {e}. Falling back to Server Relay.")
+                transfer_info['use_p2p'] = False
+                self._perform_upload(transfer_info)
             else:
-                self._safe_print(f"Send failed: {e}")
+                self._safe_print(f"Upload failed: {e}")
 
     def handle_incoming(self, data, source, tag):
         if tag == TAG_MSG:
@@ -159,6 +207,31 @@ class ChatClient:
             if cmd['type'] == 'USER_LIST_UPDATE':
                 self.online_users = cmd['users']
         
+        elif tag == 4: # TAG_FILE_REQ
+            meta = data
+            from_rank = meta.get('from_rank', source) # Fallback to source if not in meta
+            filename = meta['filename']
+            size_mb = meta['size'] / (1024*1024)
+            
+            self.pending_offers[from_rank] = meta
+            self._safe_print(f"\n[Request] Rank {from_rank} wants to send '{filename}' ({size_mb:.2f} MB).")
+            self._safe_print(f"Type '/accept {from_rank}' to receive or '/deny {from_rank}' to reject.")
+
+        elif tag == 5: # TAG_FILE_ACK
+            ack = data
+            file_id = ack['file_id']
+            if file_id in self.active_transfers:
+                transfer_info = self.active_transfers.pop(file_id)
+                self._safe_print(f"Request accepted by receiver. Starting upload...")
+                threading.Thread(target=self._perform_upload, args=(transfer_info,)).start()
+
+        elif tag == 6: # TAG_FILE_DENY
+            deny = data
+            file_id = deny['file_id']
+            if file_id in self.active_transfers:
+                info = self.active_transfers.pop(file_id)
+                self._safe_print(f"Request for '{info['filename']}' was DENIED by receiver.")
+
         elif tag == 2: 
             meta = data
             filename = meta['filename']
@@ -208,6 +281,42 @@ class ChatClient:
                     sys.stdout.flush()
                     continue
                     
+                    continue
+                    
+                if inp.startswith('/accept '):
+                    try:
+                        rank = int(inp.split(' ')[1])
+                        if rank in self.pending_offers:
+                            meta = self.pending_offers.pop(rank)
+                            ack_msg = {'file_id': meta['file_id']}
+                            # ACK goes back to sender. Logic: Sender sent REQ via (P2P or Server).
+                            # We can reply via Server (SAFE) or P2P. Let's reply via Server to be safe,
+                            # OR just reply to 'from_rank' via Server.
+                            # Actually, simplest is send to Rank 0 routed to target, or direct if we prefer.
+                            # Let's use Server Relay for Control Signals (Reliable).
+                            ack_msg['to_user'] = meta['from_user'] # Needed for Server routing
+                            self.transport.send(ack_msg, 0, 5) # TAG_FILE_ACK
+                            self._safe_print(f"Accepted file from Rank {rank}.")
+                        else:
+                            print("No pending offer from that rank.")
+                    except:
+                        print("Usage: /accept <rank>")
+                    continue
+
+                if inp.startswith('/deny '):
+                    try:
+                        rank = int(inp.split(' ')[1])
+                        if rank in self.pending_offers:
+                            meta = self.pending_offers.pop(rank)
+                            deny_msg = {'file_id': meta['file_id'], 'to_user': meta['from_user']}
+                            self.transport.send(deny_msg, 0, 6) # TAG_FILE_DENY
+                            self._safe_print(f"Denied file from Rank {rank}.")
+                        else:
+                            print("No pending offer from that rank.")
+                    except:
+                        print("Usage: /deny <rank>")
+                    continue
+
                 if inp.startswith('/dm '):
                     parts = inp.split(' ')
                     if len(parts) >= 3:
