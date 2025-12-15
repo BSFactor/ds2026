@@ -67,6 +67,7 @@ class Server:
         if dest_id and dest_id != 'all':
             target_rank = self.get_rank_by_id(dest_id)
             if target_rank:
+                print(f"[Server] Routing tag {tag} from {source} to {target_rank}")
                 self.transport.send(msg, target_rank, tag)
             else:
                 print(f"[Server] User {dest_id} not found")
